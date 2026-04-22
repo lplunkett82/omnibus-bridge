@@ -1,0 +1,11 @@
+# Reference PDFs
+
+These files are NOT committed (see .gitignore) but MUST live here for
+Claude Code sessions:
+
+- Omni-Link_II_Rev_3.0.pdf — the protocol spec we're implementing
+- Omni-Link.pdf — serial predecessor, useful cross-reference
+- 117R00-1_Rev2.pdf — Translator Reference Manual (obtain when possible)
+- 117A00-1_install_manual.pdf — short install guide
+
+Contributors must place these files here manually (they are not redistributable).

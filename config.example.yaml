@@ -1,0 +1,30 @@
+# omnibus-bridge configuration example.
+# Copy to config.yaml (gitignored) and edit.
+
+translator:
+  host: 192.0.2.10
+  port: 43690              # Omni-Link II interface (0xAAAA)
+  reconnect_seconds: 5
+  connect_timeout: 10
+  request_timeout: 10
+
+mqtt:
+  host: 192.168.1.10       # your broker
+  port: 1883
+  username: !env MQTT_USER
+  password: !env MQTT_PASS
+  base_topic: omnibus
+  discovery_prefix: homeassistant
+
+# Device list. In Phase 2 this file will be generated from OMNIBUS Software
+# config export; for now it's hand-maintained.
+devices: []
+#  - address: [5, 1]
+#    kind: dimmer
+#    name: Kitchen Pendants
+#    area: Kitchen
+#  - address: [12, 1]
+#    kind: keypad
+#    name: Master Bedroom Keypad
+#    area: Master Bedroom
+#    buttons: 6

@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Secrets
+.env
+
+# Per-installation runtime state (ships to the user's HA add-on / local tree)
+config/
+logs/
+
+# Packet captures and annotations (reverse-engineering artifacts; keep local)
+captures/*
+!captures/README.md
+*.pcap
+*.pcapng
+captures/annotated_*.txt
+
+# Scratch / debug scripts prefixed with a dot so we can grep them quickly
+.tmp_*.txt
+.scrub.py
+.analyze.py
+.byte_diff.py
+.cadence.py
+.dump_range.py
+.force_decrypt.py
+.raw_tcp.py
+.tcp_analyze.py
+
+# Third-party documentation kept locally — copyright, large binaries
+docs/*.pdf
+docs/*.CBT
+docs/document.txt
+docs/translator_manual.txt
+docs/reference/*.pdf
+
+# Claude Code harness state
+.claude/
+
+# Kickoff bundle artifacts
+files.zip
+omnibus-bridge-kickoff.zip
+phase0_prompt.txt
+phase1_prompt.txt
