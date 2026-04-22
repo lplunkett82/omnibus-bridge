@@ -39,4 +39,39 @@ Run `ruff check --fix .` before committing.
 - Conventional-commit-ish subjects: `feat:`, `fix:`, `chore:`, `docs:`,
   `test:`, `refactor:`
 - One concern per commit
-- No push to any remote until Phase 6
+
+## Git / GitHub workflow
+
+Terminology used in this repo:
+
+- **"commit to repo"** / **"commit locally"** / **"just commit"** — local
+  only. Runs `git commit`, nothing leaves the machine.
+- **"push to GitHub"** / **"commit and push"** — includes `git push` to
+  the remote.
+- **"save it"** on its own is ambiguous; ask which is meant.
+
+### Pre-push review gate (public repos)
+
+`omnibus-bridge` and `omnibus-bridge-hassio` are **public**. Before every
+push to either remote:
+
+1. `git status` — confirm no unexpected files
+2. `git diff --staged` — scan for AES keys, home-network IPs, paths with
+   the username, anything from `captures/` or `.env`-shaped content
+3. Wait for explicit confirmation before `git push`
+
+A leaked secret in a public repo is indexed within hours; recovery means
+rotating the AES keys on the Translator via OMNIBUS Software and
+rewriting history with `git filter-repo`. The gate is mandatory even for
+"obviously safe" changes.
+
+### .gitignore discipline
+
+`.gitignore` only applies to **untracked** files. Add patterns **before**
+first staging a file — once committed, `.gitignore` no longer hides it
+and `git rm --cached <path>` is required to untrack.
+
+Current rules cover `.env`, `captures/`, `config/`, `logs/`, packet
+captures, and scratch/debug scripts. If a new class of sensitive file
+appears, update `.gitignore` first, then verify with
+`git check-ignore -v <path>`.
