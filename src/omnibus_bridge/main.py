@@ -33,7 +33,7 @@ from .protocol import (
     encode_ext_object_status_push,
     encode_object_status_units,
 )
-from .scanner import DIMMER, Device, RELAY, TRANSLATOR, WALLSWITCH_BUTTON
+from .scanner import DIMMER, FAN, LOCK, Device, RELAY, TRANSLATOR, WALLSWITCH_BUTTON
 from .session import (
     Event,
     HandshakeComplete,
@@ -174,6 +174,14 @@ class Bridge:
             return
 
         if kind == "set":
+            # Lock entities send LOCK/UNLOCK instead of ON/OFF.
+            if dev.device_type == LOCK:
+                new_status = _parse_lock_command(payload)
+                if new_status is None:
+                    log.warning("MQTT unit %d lock: unparseable payload %r", unit, payload)
+                    return
+                await self.set_unit(unit, new_status)
+                return
             new_status = _parse_on_off(payload)
             if new_status is None:
                 log.warning("MQTT unit %d set: unparseable payload %r", unit, payload)
@@ -395,6 +403,15 @@ class Bridge:
             old_obj_id = build_object_id("button", d.unit_number, name)
             old_topic = f"{cfg.discovery_prefix}/event/{cfg.node_id}/{old_obj_id}/config"
             self._mqtt.publish(old_topic, "", retain=True)
+        # Migration: retire stale `light` discovery for units that changed
+        # domain to `fan` or `lock`. Without this, HA sees both the old
+        # light and the new fan/lock for the same unique_id and ignores the
+        # new one.
+        for d in self._devices_by_unit.values():
+            if d.device_type in (FAN, LOCK):
+                obj_id = build_object_id("unit", d.unit_number, d.name)
+                old_topic = f"{cfg.discovery_prefix}/light/{cfg.node_id}/{obj_id}/config"
+                self._mqtt.publish(old_topic, "", retain=True)
         payloads = build_discovery_payloads(
             cfg,
             list(self._devices_by_unit.values()),
@@ -411,7 +428,7 @@ class Bridge:
         physical inputs)."""
         assert self._mqtt is not None
         for d in self._devices_by_unit.values():
-            if d.device_type in (RELAY, DIMMER, WALLSWITCH_BUTTON):
+            if d.device_type in (RELAY, DIMMER, FAN, LOCK, WALLSWITCH_BUTTON):
                 self._mqtt.subscribe(set_topic(self._mqtt.cfg, d.unit_number))
             if d.device_type == DIMMER:
                 self._mqtt.subscribe(
@@ -428,6 +445,14 @@ class Bridge:
                 snap = self.state.get(d.unit_number) if 1 <= d.unit_number <= self.state.count else None
                 status = snap.status if snap is not None else 0
                 self._publish_light_state(d, status)
+            elif d.device_type == FAN:
+                snap = self.state.get(d.unit_number) if 1 <= d.unit_number <= self.state.count else None
+                status = snap.status if snap is not None else 0
+                self._publish_fan_state(d, status)
+            elif d.device_type == LOCK:
+                snap = self.state.get(d.unit_number) if 1 <= d.unit_number <= self.state.count else None
+                status = snap.status if snap is not None else 0
+                self._publish_lock_state(d, status)
             elif d.device_type == WALLSWITCH_BUTTON:
                 self._publish_button_state(d, 0)
 
@@ -440,6 +465,10 @@ class Bridge:
             return
         if dev.device_type in (RELAY, DIMMER):
             self._publish_light_state(dev, new)
+        elif dev.device_type == FAN:
+            self._publish_fan_state(dev, new)
+        elif dev.device_type == LOCK:
+            self._publish_lock_state(dev, new)
         elif dev.device_type == WALLSWITCH_BUTTON:
             self._publish_button_state(dev, new)
 
@@ -539,11 +568,39 @@ class Bridge:
             )
 
 
+    def _publish_fan_state(self, dev: Device, status: int) -> None:
+        assert self._mqtt is not None
+        self._mqtt.publish(
+            state_topic(self._mqtt.cfg, dev.unit_number),
+            "ON" if status != 0 else "OFF",
+            retain=True,
+        )
+
+    def _publish_lock_state(self, dev: Device, status: int) -> None:
+        """Publish lock state. ON (relay energized) = UNLOCKED, OFF = LOCKED."""
+        assert self._mqtt is not None
+        self._mqtt.publish(
+            state_topic(self._mqtt.cfg, dev.unit_number),
+            "UNLOCKED" if status != 0 else "LOCKED",
+            retain=True,
+        )
+
+
 def _parse_on_off(payload: str) -> int | None:
     s = payload.strip().upper()
     if s in ("ON", "1", "TRUE"):
         return 1
     if s in ("OFF", "0", "FALSE"):
+        return 0
+    return None
+
+
+def _parse_lock_command(payload: str) -> int | None:
+    """Parse an HA MQTT lock command. UNLOCK → ON (1), LOCK → OFF (0)."""
+    s = payload.strip().upper()
+    if s == "UNLOCK":
+        return 1
+    if s == "LOCK":
         return 0
     return None
 

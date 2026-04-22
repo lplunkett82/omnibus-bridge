@@ -26,7 +26,7 @@ from typing import Awaitable, Callable
 
 import paho.mqtt.client as paho
 
-from .scanner import DIMMER, Device, RELAY, TRANSLATOR, WALLSWITCH_BUTTON
+from .scanner import DIMMER, FAN, LOCK, Device, RELAY, TRANSLATOR, WALLSWITCH_BUTTON
 
 log = logging.getLogger(__name__)
 
@@ -223,6 +223,44 @@ def build_discovery_payloads(
                 "device": dev_info,
             }
             out.append((sensor_topic, sensor_payload))
+
+        elif d.device_type == FAN:
+            obj_id = _object_id("unit", d.unit_number, d.name)
+            topic = discovery_topic(cfg, "fan", obj_id)
+            payload = {
+                "unique_id": obj_id,
+                "name": d.name,
+                "object_id": obj_id,
+                "state_topic": state_topic(cfg, d.unit_number),
+                "command_topic": set_topic(cfg, d.unit_number),
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "availability_topic": avail,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+                "device": dev_info,
+            }
+            out.append((topic, payload))
+
+        elif d.device_type == LOCK:
+            obj_id = _object_id("unit", d.unit_number, d.name)
+            topic = discovery_topic(cfg, "lock", obj_id)
+            payload = {
+                "unique_id": obj_id,
+                "name": d.name,
+                "object_id": obj_id,
+                "state_topic": state_topic(cfg, d.unit_number),
+                "command_topic": set_topic(cfg, d.unit_number),
+                "payload_lock": "LOCK",
+                "payload_unlock": "UNLOCK",
+                "state_locked": "LOCKED",
+                "state_unlocked": "UNLOCKED",
+                "availability_topic": avail,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+                "device": dev_info,
+            }
+            out.append((topic, payload))
 
         elif d.device_type == TRANSLATOR:
             # MVP: Translator itself isn't discovered as an entity (it's the

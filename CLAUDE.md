@@ -120,6 +120,24 @@ and bridge integration.
   mirroring the Translator's switch port and running `tcpdump` on the
   capture host.
 
+## Home Assistant entity management
+
+- **Renaming entities**: use HA's WebSocket API
+  (`config/entity_registry/update`) while HA is running. This is the same
+  mechanism the HA UI uses and persists across restarts. Connect to
+  `ws://supervisor/core/api/websocket`, authenticate with
+  `$SUPERVISOR_TOKEN`, then send
+  `{"id": N, "type": "config/entity_registry/update", "entity_id": "...", "name": "..."}`.
+- **Do NOT edit `/config/.storage/core.entity_registry` directly** — HA
+  overwrites user-set `name` fields on restart when MQTT discovery
+  re-processes retained messages.
+- **Do NOT change `name` in `units.yaml` to rename entities** — the `name`
+  field feeds into `object_id` and `unique_id` in MQTT discovery. Changing
+  it creates new entities with new entity IDs instead of renaming existing
+  ones.
+- **HA SSH access**: `ssh -p 2222 -i ~/.ssh/id_ed25519 root@192.168.1.16`.
+  The `websocket-client` Python package is installed for WebSocket API use.
+
 ## Reference material
 
 - **Omni-Link II Protocol Description, Rev 3.0, Oct 2009** (HAI doc 20P00)

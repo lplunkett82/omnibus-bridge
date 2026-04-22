@@ -80,6 +80,8 @@ RELAY_TRAILER_OFFSET = 0x2E  # '1E 5A' marker present only on relay records
 RELAY = "relay"
 WALLSWITCH_BUTTON = "wallswitch_button"
 DIMMER = "dimmer"
+FAN = "fan"
+LOCK = "lock"
 TRANSLATOR = "translator"
 
 
@@ -96,7 +98,7 @@ class Device:
 
     unit_number: int
     name: str
-    device_type: str  # one of RELAY, WALLSWITCH_BUTTON, DIMMER, TRANSLATOR
+    device_type: str  # one of RELAY, WALLSWITCH_BUTTON, DIMMER, FAN, LOCK, TRANSLATOR
     raw_frame: bytes = field(repr=False)
     header: bytes = field(repr=False, default=b"")
     # Translator-only metadata (None for other device kinds)

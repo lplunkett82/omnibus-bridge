@@ -59,11 +59,15 @@ Status legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ blocked
 
 ## Phase 6 — HA add-on packaging
 
-- ⬜ `Dockerfile` (Alpine + Python 3.12)
-- ⬜ `config.yaml` (MQTT + Translator IP + keys)
-- ⬜ `run.sh` entrypoint
-- ⬜ Ingress web UI with a Scan button
-- ⬜ HACS-compatible repo published
+Published as a separate repo:
+[github.com/lplunkett82/omnibus-bridge-hassio](https://github.com/lplunkett82/omnibus-bridge-hassio).
+
+- ✅ `Dockerfile` (Alpine + Python 3.12, `pip install git+...` the bridge)
+- ✅ `config.yaml` (MQTT + Translator + keys, `schema` + defaults)
+- ✅ `build.yaml` (multi-arch: amd64, aarch64, armv7)
+- ✅ `run.sh` entrypoint (bashio options → CLI args)
+- ✅ Ingress web UI with Scan button + status + device list
+- ⬜ 7-day real-world soak under the add-on runtime
 
 ## Phase 7 — Open source
 
