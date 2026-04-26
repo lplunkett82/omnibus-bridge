@@ -242,7 +242,10 @@ class OmniLinkServer:
         while True:
             try:
                 data = await reader.read(READ_CHUNK)
-            except ConnectionError:
+            except (ConnectionError, TimeoutError):
+                # TimeoutError is the kernel's ETIMEDOUT after SO_KEEPALIVE
+                # probes fail — a normal "peer went away silently" outcome,
+                # not an application bug. Treat like any other disconnect.
                 return
             if not data:  # EOF
                 return

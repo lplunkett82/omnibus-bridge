@@ -1,5 +1,45 @@
 # Bugs & quirks
 
+## 2026-04-27 — phantom hallway-light morning activations on pve install
+
+**Symptom:** for several mornings while the bridge ran on the Proxmox host
+directly (`/root/omnibus-bridge-v2/`), the hallway relays (units 13 "Hall
+Floor" and 15 "Hall Pendant") would switch on between roughly 05:30 and
+08:30 local time without any HA automation or wall-switch press. User
+manually cleared them from HA each time (e.g. 06:22 OFF push observed in
+the old bridge log on 2026-04-25).
+
+**Cause (confirmed):** the read loop in
+[transport.py](../src/omnibus_bridge/transport.py) was catching
+`ConnectionError` but not `TimeoutError`. When SO_KEEPALIVE probes
+failed (kernel returns `ETIMEDOUT`, raised as `TimeoutError`, NOT a
+`ConnectionError` — they're sibling subclasses of `OSError`), the
+exception bubbled to the generic `except Exception` and was logged as
+ERROR with a traceback. Functionally the session still recovered: the
+Translator reconnected within seconds and rehandshook.
+
+**Mechanism (hypothesis, not proven):** the morning phantom-on
+correlates strongly with reconnect events but the exact path by which a
+reconnect leaves a hallway relay physically energised wasn't isolated.
+Working theory is that on a non-trivial fraction of reconnects, the
+post-handshake state push from the bridge and the Translator's own poll
+cadence get out of order, leaving the Translator with stale "on" state
+for the relay until the next push lands. Worth captures-driven
+investigation if it ever recurs.
+
+The pve install averaged ~30 such reconnects per 4 days, with morning
+clusters in the 05–09 window. After the 2026-04-26 migration to CT 103,
+reconnect rate dropped ~50× (1 reconnect in the first 20 h, recovered
+cleanly), and morning phantoms stopped — the new LXC's network path is
+materially quieter. Migration alone fixed the user-visible symptom.
+
+**Fix:** add `TimeoutError` to the read-loop's expected-disconnect
+exceptions so silent-peer keepalive timeouts log at INFO ("translator
+disconnected") instead of an ERROR + traceback. Doesn't change recovery
+behaviour, but stops the noisy log signature and removes one source of
+false-alarm triage. Cosmetic but worth keeping clean now that the
+underlying instability is gone.
+
 ## 2026-04-21 — nmap SYN scan missed the live protocol port (4106)
 
 Initial reconnaissance ran `nmap -sS -p 1-65535 192.0.2.10` (2026-04-20)
