@@ -1,44 +1,80 @@
 # Bugs & quirks
 
-## 2026-04-27 — phantom hallway-light morning activations on pve install
+## 2026-04-27/28 — phantom relay activations after silent TCP reconnect
 
-**Symptom:** for several mornings while the bridge ran on the Proxmox host
-directly (`/root/omnibus-bridge-v2/`), the hallway relays (units 13 "Hall
-Floor" and 15 "Hall Pendant") would switch on between roughly 05:30 and
-08:30 local time without any HA automation or wall-switch press. User
-manually cleared them from HA each time (e.g. 06:22 OFF push observed in
-the old bridge log on 2026-04-25).
+**Symptom:** relays switch on without any HA automation or wall-switch
+press. Originally observed on the pve install as morning hallway lights
+(units 13 "Hall Floor", 15 "Hall Pendant") between roughly 05:30 and
+08:30 local time. After migration to CT 103 the rate dropped ~50× but
+the issue persists at lower frequency: bedroom pendant (unit 8 "B1
+Pendant") came on at 02:12 AEST on 2026-04-28.
 
-**Cause (confirmed):** the read loop in
-[transport.py](../src/omnibus_bridge/transport.py) was catching
-`ConnectionError` but not `TimeoutError`. When SO_KEEPALIVE probes
-failed (kernel returns `ETIMEDOUT`, raised as `TimeoutError`, NOT a
-`ConnectionError` — they're sibling subclasses of `OSError`), the
-exception bubbled to the generic `except Exception` and was logged as
-ERROR with a traceback. Functionally the session still recovered: the
-Translator reconnected within seconds and rehandshook.
+**Mechanism (confirmed 2026-04-28):** every observed phantom-on tracks
+1:1 with the sequence
+`silent disconnect → Translator reconnect → handshake complete →
+~4 s later, Translator pushes a CONTROLLER_COMMAND burst that includes
+cmd=1 for at least one relay`. The relay physically actuates as part of
+that burst and stays on until something (HA automation, the user, a
+wall-switch press) turns it off again.
 
-**Mechanism (hypothesis, not proven):** the morning phantom-on
-correlates strongly with reconnect events but the exact path by which a
-reconnect leaves a hallway relay physically energised wasn't isolated.
-Working theory is that on a non-trivial fraction of reconnects, the
-post-handshake state push from the bridge and the Translator's own poll
-cadence get out of order, leaving the Translator with stale "on" state
-for the relay until the next push lands. Worth captures-driven
-investigation if it ever recurs.
+The 2026-04-28 event in `/root/omnibus-bridge/bridge.log` is the
+clearest example:
 
-The pve install averaged ~30 such reconnects per 4 days, with morning
-clusters in the 05–09 window. After the 2026-04-26 migration to CT 103,
-reconnect rate dropped ~50× (1 reconnect in the first 20 h, recovered
-cleanly), and morning phantoms stopped — the new LXC's network path is
-materially quieter. Migration alone fixed the user-visible symptom.
+```
+16:12:13 translator disconnected: 192.168.1.30:4102      ← silent TCP timeout
+16:12:51 translator connected:    192.168.1.30:4097
+16:12:53 handshake complete (session_id=7ECD0D0EA6)
+16:12:57 physical event: cmd=1 p2=13 (Hall Floor)        ┐
+16:12:57 physical event: cmd=1 p2=15 (Hall Pendant)      │ post-reconnect burst
+16:12:57 physical event: cmd=1 p2=8  (B1 Pendant)        │
+16:12:57 physical event: cmd=0 p2=13 (Hall Floor)        │
+16:12:57 physical event: cmd=0 p2=15 (Hall Pendant)      ┘
+16:13:20 cmd=0 p2=8 + p2=27 (paired = wall-switch off press)
+```
 
-**Fix:** add `TimeoutError` to the read-loop's expected-disconnect
-exceptions so silent-peer keepalive timeouts log at INFO ("translator
-disconnected") instead of an ERROR + traceback. Doesn't change recovery
-behaviour, but stops the noisy log signature and removes one source of
-false-alarm triage. Cosmetic but worth keeping clean now that the
-underlying instability is gone.
+Hall Floor and Hall Pendant got ON-then-OFF in the same second
+(harmless). B1 Pendant got ON only — physically energised, stayed on
+for 23 s until the user flipped the wall switch.
+
+**Underlying TCP cause (confirmed):** the silent disconnect is the
+bridge's SO_KEEPALIVE probes timing out (kernel `ETIMEDOUT`, raised as
+`TimeoutError`). The read loop in [transport.py](../src/omnibus_bridge/transport.py)
+originally caught `ConnectionError` but not `TimeoutError` — they're
+sibling subclasses of `OSError`, not parent/child — so the exception
+bubbled to the generic handler and logged as `ERROR` + traceback. Fix
+in commit `3f7e7c3` (2026-04-27) added `TimeoutError` to the catch.
+This is **purely cosmetic**: it cleans up the log signature but does
+NOT prevent the disconnect, the burst, or the phantom actuation. The
+TCP blip itself appears to be a real network-path artifact (~30/4d on
+pve, ~1-2/day on CT 103) and may not be eliminable from the bridge
+side.
+
+**Why the burst contains `cmd=1` is not yet proven.** Three candidate
+mechanisms, ordered by next-check cost:
+
+1. The bridge's state-restore on handshake-complete is sending
+   `0x3B seq=0` with stale ON values from a previous session, and the
+   Translator is faithfully obeying.
+2. The Translator unilaterally actuates relays during the disconnect
+   window and reports the resulting state on reconnect — independent
+   of anything the bridge does.
+3. Race between the bridge's post-handshake state push and the
+   Translator's own poll cadence leaves a window in which the
+   Translator's view is authoritative and disagrees with ours.
+
+A continuous packet capture is running on the pve host (rolling 72×1h,
+filter `host 192.168.1.30 and host 192.168.1.36`, see
+`/root/captures/ROLLING_README.txt`) so the next phantom-on can be
+decrypted byte-for-byte. The decrypted handshake + immediately-following
+seconds will show whether the burst is bridge-originated `0x3B` or
+Translator-originated `0x14`, which determines whether the fix lives in
+the bridge or has to be a defensive layer (post-handshake state
+reassertion + reconnect-grace-period filter on inbound `cmd=1`).
+
+**Earlier-claim correction:** an earlier version of this note (2026-04-27)
+stated the LXC migration alone "fixed the user-visible symptom". The
+2026-04-28 02:12 AEST event disproves that. The migration reduced rate
+(~50×) but did not eliminate the mechanism.
 
 ## 2026-04-21 — nmap SYN scan missed the live protocol port (4106)
 
