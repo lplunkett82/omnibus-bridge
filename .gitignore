@@ -51,3 +51,6 @@ files.zip
 omnibus-bridge-kickoff.zip
 phase0_prompt.txt
 phase1_prompt.txt
+
+# Cross-project handover docs (live here for convenience, not part of this project)
+HANDOVER_*.md
