@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 from typing import Awaitable, Callable
 
 from .session import Event, ServerSession, SessionState
@@ -37,6 +38,11 @@ _KEEPALIVE_PROBES = 3
 # client that connects and goes idle would hold the single client slot
 # forever, locking the real Translator out.
 DEFAULT_HANDSHAKE_TIMEOUT_S = 30.0
+
+# Warn about a rejected (non-allowlisted) peer at most this often per host.
+# A health checker probing every minute (e.g. Uptime Kuma's TCP monitor)
+# would otherwise write 1440 WARNING lines a day.
+_REJECT_LOG_INTERVAL_S = 600.0
 
 # Shrink our advertised TCP window to match OmniPro's embedded-stack
 # signature. OmniPro advertises win=255, we default to ~65 KB. Tested
@@ -163,6 +169,7 @@ class OmniLinkServer:
         self._handshake_timeout = handshake_timeout
         self._server: asyncio.base_events.Server | None = None
         self._current: ConnectedClient | None = None
+        self._reject_log_times: dict[str, float] = {}
 
     @property
     def current_client(self) -> ConnectedClient | None:
@@ -226,11 +233,7 @@ class OmniLinkServer:
     ) -> None:
         peer = _peer_name(writer)
         if self._allowed_peer is not None and _peer_host(writer) != self._allowed_peer:
-            log.warning(
-                "rejecting connection from %s: not the configured Translator (%s)",
-                peer,
-                self._allowed_peer,
-            )
+            self._log_rejected_peer(_peer_host(writer), peer)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -273,6 +276,22 @@ class OmniLinkServer:
             except Exception:  # noqa: BLE001
                 pass
             log.info("translator disconnected: %s", peer)
+
+    def _log_rejected_peer(self, host: str, peer: str) -> None:
+        """WARN about a rejected peer at most once per host per interval;
+        repeat rejections drop to DEBUG so a periodic prober can't flood
+        the log."""
+        now = time.monotonic()
+        last = self._reject_log_times.get(host)
+        if last is None or now - last >= _REJECT_LOG_INTERVAL_S:
+            self._reject_log_times[host] = now
+            log.warning(
+                "rejecting connection from %s: not the configured Translator (%s)",
+                peer,
+                self._allowed_peer,
+            )
+        else:
+            log.debug("rejecting connection from %s (repeat, suppressed)", peer)
 
     async def _handshake_watchdog(self, client: ConnectedClient) -> None:
         """Abort the connection if the handshake hasn't completed in time."""

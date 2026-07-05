@@ -250,6 +250,32 @@ async def test_connection_from_unlisted_peer_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repeat_rejections_from_same_host_only_warn_once(caplog) -> None:
+    """A periodic prober (e.g. an Uptime Kuma TCP monitor) hitting a
+    non-allowlisted port every minute must not flood the log — one WARNING
+    per host per interval, the rest at DEBUG."""
+    import logging
+
+    handler = CollectingHandler()
+    server = OmniLinkServer(
+        PRIVATE_KEY, handler, host="127.0.0.1", port=0,
+        allowed_peer="203.0.113.9",
+    )
+    await server.start()
+    try:
+        with caplog.at_level(logging.WARNING, logger="omnibus_bridge.transport"):
+            for _ in range(3):
+                reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+                await asyncio.wait_for(reader.read(10), timeout=1.0)
+                writer.close()
+        warnings = [r for r in caplog.records
+                    if r.levelno == logging.WARNING and "rejecting" in r.message]
+        assert len(warnings) == 1
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_handshake_timeout_aborts_idle_connection() -> None:
     """A client that connects but never handshakes must not hold the single
     client slot forever — the watchdog aborts it."""
