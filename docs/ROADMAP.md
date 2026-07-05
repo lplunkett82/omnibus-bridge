@@ -47,8 +47,15 @@ Status legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ blocked
 - ✅ MQTT re-subscribe on reconnect
 - ✅ TCP keepalive tuning (~8 s dead-peer detection)
 - ⬜ Prometheus metrics endpoint (optional)
-- ⬜ Systemd service file (only for bare-metal installs; HA add-on
-  doesn't need it)
+- ✅ Systemd service file — installed on the LXC deployment
+  (`omnibus-bridge.service` with `Restart=always`). Not bundled in the
+  HA add-on (the add-on runtime supervises its own process).
+- ✅ **Bridge moved off the Proxmox host into a dedicated LXC**
+  (2026-04-26). Now runs in CT 103, Debian 12 + Python 3.11 + venv with
+  paho-mqtt 2.1.0, started by systemd, `--onboot 1` so it survives
+  pve reboots. Verified surviving both `systemctl restart` and full
+  CT reboot. Reversible via Translator Controller-IP flip back to the
+  pve install (kept as rollback for ~1 week).
 
 ## Phase 5 — OmniPro II removal
 

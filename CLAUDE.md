@@ -1,3 +1,4 @@
+
 # omnibus-bridge — project context
 
 This file is read by Claude Code sessions and by new contributors. It
@@ -120,23 +121,36 @@ and bridge integration.
   mirroring the Translator's switch port and running `tcpdump` on the
   capture host.
 
-## Home Assistant entity management
+## Current operational state (2026-07-05)
 
-- **Renaming entities**: use HA's WebSocket API
-  (`config/entity_registry/update`) while HA is running. This is the same
-  mechanism the HA UI uses and persists across restarts. Connect to
-  `ws://supervisor/core/api/websocket`, authenticate with
-  `$SUPERVISOR_TOKEN`, then send
-  `{"id": N, "type": "config/entity_registry/update", "entity_id": "...", "name": "..."}`.
-- **Do NOT edit `/config/.storage/core.entity_registry` directly** — HA
-  overwrites user-set `name` fields on restart when MQTT discovery
-  re-processes retained messages.
-- **Do NOT change `name` in `units.yaml` to rename entities** — the `name`
-  field feeds into `object_id` and `unique_id` in MQTT discovery. Changing
-  it creates new entities with new entity IDs instead of renaming existing
-  ones.
-- **HA SSH access**: `ssh -p 2222 -i ~/.ssh/id_ed25519 root@192.168.1.16`.
-  The `websocket-client` Python package is installed for WebSocket API use.
+- Bridge runs in **CT 103** on the Proxmox host: `192.168.1.36:4370`,
+  Debian 12, Python 3.11 venv, systemd unit `omnibus-bridge.service`
+  with `Restart=always` and `--onboot 1`. Old pve rollback install
+  deleted 2026-07-05.
+- Translator at `192.168.1.30`, dials the bridge from an ephemeral
+  source port (4097+ range observed). MQTT broker at
+  `192.168.1.16:1883`. `start.sh` runs with
+  `--allow-peer 192.168.1.30` — only the Translator may connect.
+- **2026-07-05 hardening deployed** (commit `c9db96b`): newest
+  connection evicts a stale client, 30 s handshake watchdog, peer
+  allowlist, pushes requeued on socket errors, 60 s TTL on queued
+  pushes, MQTT-unreachable-at-boot no longer fatal, state-file load
+  hardened.
+- **Active investigation:** post-reconnect phantom relay actuations.
+  Confirmed mechanism (silent TCP disconnect → reconnect → handshake →
+  `~4 s` later Translator pushes `cmd=1` burst → relay physically
+  energises). ~9 reconnects/day observed Apr-Jul; post-handshake
+  `cmd=1` bursts recur regularly. Root cause (bridge `0x3B` push vs
+  Translator-side) still unproven. See [docs/BUGS.md](docs/BUGS.md).
+  Note: Uptime Kuma (CT 108, `192.168.1.28`) TCP-probes the bridge
+  port every 60 s; harmless since the allowlist, but it shows up in
+  logs as rejected connections.
+- **Rolling pcap rig**: systemd unit `omnibus-pcap.service` on pve,
+  capturing on `veth103i0` (CT 103's veth on the host — the old USB
+  mirror NIC `enx00e04c69e3ff` is physically gone from pve). 1h ×
+  72-file ring at `/root/captures/omnibus_rolling_*.pcap`. Next
+  phantom-on will have full decryptable bytes
+  (`tools/pcap_decrypt.py` + keys from CT 103 `.env`).
 
 ## Reference material
 
