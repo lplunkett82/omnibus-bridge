@@ -297,9 +297,16 @@ class MqttClient:
         await client.stop()
     """
 
-    def __init__(self, cfg: MqttConfig, on_command: CommandHandler) -> None:
+    def __init__(
+        self,
+        cfg: MqttConfig,
+        on_command: CommandHandler,
+        *,
+        connect_timeout: float = 15.0,
+    ) -> None:
         self.cfg = cfg
         self._on_command = on_command
+        self._connect_timeout = connect_timeout
         self._loop: asyncio.AbstractEventLoop | None = None
         self._connected_event = asyncio.Event()
         # With clean_session=True the broker drops our subscriptions on every
@@ -330,13 +337,21 @@ class MqttClient:
         self._client.connect_async(self.cfg.host, self.cfg.port, keepalive=60)
         self._client.loop_start()
         try:
-            await asyncio.wait_for(self._connected_event.wait(), timeout=15.0)
-        except asyncio.TimeoutError as e:
-            self._client.loop_stop()
-            raise ConnectionError(
-                f"MQTT broker {self.cfg.host}:{self.cfg.port} did not connect "
-                f"within 15 s"
-            ) from e
+            await asyncio.wait_for(
+                self._connected_event.wait(), timeout=self._connect_timeout
+            )
+        except TimeoutError:
+            # Don't die: the broker may simply not be up yet (e.g. HA still
+            # booting after a host power cycle — observed live 2026-07-05).
+            # Paho keeps retrying in the background; QoS-1 publishes issued
+            # meanwhile are queued and delivered on connect, and _on_connect
+            # restores subscriptions. The bridge's Translator side is fully
+            # functional without the broker.
+            log.warning(
+                "MQTT broker %s:%d not reachable within %.0f s — continuing; "
+                "paho will keep retrying in the background",
+                self.cfg.host, self.cfg.port, self._connect_timeout,
+            )
 
     async def stop(self) -> None:
         # Mark offline, flush, disconnect cleanly.

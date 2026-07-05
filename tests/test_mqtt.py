@@ -4,7 +4,10 @@ Pure-function tests — no broker required.
 """
 from __future__ import annotations
 
+import pytest
+
 from omnibus_bridge.mqtt import (
+    MqttClient,
     MqttConfig,
     _UNIT_SET_RE,
     availability_topic,
@@ -157,3 +160,20 @@ def test_translator_is_embedded_in_device_info_not_published_as_entity():
     assert payload["device"]["configuration_url"] == "http://192.0.2.10/"
     # Device identifiers include the Translator's hardware ID
     assert any("XXXXXXXX" in ident for ident in payload["device"]["identifiers"])
+
+
+# -- Startup resilience -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_continues_when_broker_unreachable():
+    """The bridge must come up even if the broker is down at boot (e.g. HA
+    still starting after a power cycle) — paho retries in the background,
+    QoS-1 publishes queue, and subscriptions are restored on connect."""
+    async def _noop(unit: int, kind: str, payload: str) -> None:
+        pass
+
+    cfg = MqttConfig(host="127.0.0.1", port=1)  # nothing listens on port 1
+    client = MqttClient(cfg, _noop, connect_timeout=0.3)
+    await client.start()  # must not raise
+    await client.stop()

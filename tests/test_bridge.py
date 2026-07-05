@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import time
 from pathlib import Path
 
 import pytest
 
 from omnibus_bridge.crypto import BLOCK_SIZE
-from omnibus_bridge.main import Bridge
+from omnibus_bridge.main import PENDING_PUSH_TTL_S, Bridge
 from omnibus_bridge.protocol import (
     InnerType,
     OuterType,
@@ -130,6 +131,47 @@ async def test_set_unit_pushes_seq0_ext_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_push_requeued_when_socket_dies_mid_send() -> None:
+    """A ConnectionError during the wire write must re-queue the push, not
+    silently drop it — HA commands issued in the reconnect window would
+    otherwise vanish."""
+    bridge = await _spin_up_bridge()
+    try:
+        class _DeadClient:
+            async def send_inner(self, *args, **kwargs):
+                raise ConnectionResetError("peer went away mid-write")
+
+        await bridge._send_push(_DeadClient(), 4, 1)
+        assert 4 in bridge._pending_pushes
+        assert bridge._pending_pushes[4][0] == 1
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_push_discarded_on_flush() -> None:
+    """A push queued longer than PENDING_PUSH_TTL_S ago no longer reflects
+    current intent — flushing it on reconnect would be a bridge-originated
+    phantom actuation. It must be dropped, not sent."""
+    bridge = await _spin_up_bridge()
+    try:
+        await bridge.set_unit(7, 1)
+        assert 7 in bridge._pending_pushes
+        # Age the entry past the TTL.
+        status, _ = bridge._pending_pushes[7]
+        bridge._pending_pushes[7] = (status, time.monotonic() - PENDING_PUSH_TTL_S - 10)
+
+        trans = await _connect_scripted(bridge)
+        # Nothing must arrive on the wire, and the queue must be empty.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(trans.recv_app(), timeout=0.3)
+        assert bridge._pending_pushes == {}
+        trans.close()
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
 async def test_set_unit_queued_while_offline_then_flushed_on_next_handshake() -> None:
     """Pushes issued while the Translator is disconnected should be held and
     flushed as the first thing we send on the next session."""
@@ -175,6 +217,31 @@ def test_state_load_missing_file_is_noop(tmp_path: Path) -> None:
     s = UnitStateTable(36)
     assert s.load(tmp_path / "nope.json") == 0
     assert s.get(4).status == 0
+
+
+def test_state_load_skips_malformed_entries(tmp_path: Path) -> None:
+    """A corrupt state file must never crash startup — bad entries are
+    skipped, good ones still load."""
+    import json
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"units": {
+        "3": {"status": 1},          # good
+        "bad": 5,                     # value not a dict
+        "7": {"status": "x"},         # non-numeric status
+        "9": None,                    # null value
+        "11": {"status": 999},        # out of range
+    }}))
+    s = UnitStateTable(36)
+    assert s.load(path) == 1
+    assert s.get(3).status == 1
+    assert s.get(11).status == 0
+
+
+def test_state_load_handles_non_dict_json(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text("[1, 2, 3]")
+    s = UnitStateTable(36)
+    assert s.load(path) == 0
 
 
 def test_bridge_restores_state_from_file_on_startup(tmp_path: Path) -> None:

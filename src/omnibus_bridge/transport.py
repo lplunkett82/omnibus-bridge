@@ -2,10 +2,12 @@
 
 Thin adapter between `asyncio.start_server` and the sans-IO `ServerSession`.
 The Translator makes exactly one long-lived connection to us on TCP :4369;
-we accept at most one client at a time. A second connection arriving while
-one is active is closed immediately — in practice there's only one
-Translator on the LAN, but this guards against stale reconnect attempts
-after a network blip.
+we accept at most one client at a time. A new connection arriving while one
+is active *replaces* it: after a silent drop the Translator redials from a
+new ephemeral port while the old socket can look alive for up to ~8 s
+(keepalive window), so the newest connection is always the real one. The
+stale socket is aborted (RST) rather than gracefully closed — its peer is
+gone by definition.
 """
 from __future__ import annotations
 
@@ -29,6 +31,12 @@ READ_CHUNK = 4096
 _KEEPALIVE_IDLE_S = 5
 _KEEPALIVE_INTVL_S = 1
 _KEEPALIVE_PROBES = 3
+
+# A connection that hasn't completed the handshake within this window is
+# aborted. Keepalive only catches *dead* peers — without this, any TCP
+# client that connects and goes idle would hold the single client slot
+# forever, locking the real Translator out.
+DEFAULT_HANDSHAKE_TIMEOUT_S = 30.0
 
 # Shrink our advertised TCP window to match OmniPro's embedded-stack
 # signature. OmniPro advertises win=255, we default to ~65 KB. Tested
@@ -107,6 +115,17 @@ class ConnectedClient:
         except Exception:  # noqa: BLE001 — socket already torn down
             pass
 
+    def abort(self) -> None:
+        """Hard-close the socket immediately (RST), no flush.
+
+        Used to evict a stale/zombie connection: a graceful close would try
+        to drain to a peer that is gone, blocking for up to the keepalive
+        timeout. Aborting also unblocks the connection's read loop at once.
+        """
+        transport = self._writer.transport
+        if transport is not None:
+            transport.abort()
+
 
 EventHandler = Callable[[Event, ConnectedClient], Awaitable[None]]
 
@@ -133,11 +152,15 @@ class OmniLinkServer:
         *,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
+        allowed_peer: str | None = None,
+        handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
     ) -> None:
         self._private_key = private_key
         self._handler = handler
         self._host = host
         self._port = port
+        self._allowed_peer = allowed_peer
+        self._handshake_timeout = handshake_timeout
         self._server: asyncio.base_events.Server | None = None
         self._current: ConnectedClient | None = None
 
@@ -202,11 +225,11 @@ class OmniLinkServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         peer = _peer_name(writer)
-        if self._current is not None:
+        if self._allowed_peer is not None and _peer_host(writer) != self._allowed_peer:
             log.warning(
-                "rejecting new connection from %s: already have active client %s",
+                "rejecting connection from %s: not the configured Translator (%s)",
                 peer,
-                self._current.peer,
+                self._allowed_peer,
             )
             writer.close()
             try:
@@ -215,23 +238,55 @@ class OmniLinkServer:
                 pass
             return
 
+        if self._current is not None:
+            # Newest connection wins: after a silent drop the Translator
+            # redials from a new port before keepalive declares the old
+            # socket dead. Abort the stale one so its read loop exits now.
+            log.warning(
+                "new connection from %s; evicting stale client %s",
+                peer,
+                self._current.peer,
+            )
+            self._current.abort()
+
         log.info("translator connected: %s", peer)
         _tune_socket(writer)
         session = ServerSession(self._private_key)
         client = ConnectedClient(session, writer, peer)
         self._current = client
+        watchdog = asyncio.get_running_loop().create_task(
+            self._handshake_watchdog(client)
+        )
         try:
             await self._run_read_loop(reader, client)
         except Exception:
             log.exception("unhandled error in session with %s", peer)
         finally:
-            self._current = None
+            watchdog.cancel()
+            # Only clear the slot if it's still ours — an evicting new
+            # connection may already have replaced us.
+            if self._current is client:
+                self._current = None
             writer.close()
             try:
                 await writer.wait_closed()
             except Exception:  # noqa: BLE001
                 pass
             log.info("translator disconnected: %s", peer)
+
+    async def _handshake_watchdog(self, client: ConnectedClient) -> None:
+        """Abort the connection if the handshake hasn't completed in time."""
+        await asyncio.sleep(self._handshake_timeout)
+        if client.session.state in (
+            SessionState.AWAITING_NEW_SESSION,
+            SessionState.AWAITING_SECURE,
+        ):
+            log.warning(
+                "handshake not completed within %.0f s by %s; aborting connection",
+                self._handshake_timeout,
+                client.peer,
+            )
+            client.abort()
 
     async def _run_read_loop(
         self,
@@ -266,6 +321,14 @@ def _peer_name(writer: asyncio.StreamWriter) -> str:
     try:
         host, port, *_ = writer.get_extra_info("peername") or ("?", 0)
         return f"{host}:{port}"
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def _peer_host(writer: asyncio.StreamWriter) -> str:
+    try:
+        host, *_ = writer.get_extra_info("peername") or ("?",)
+        return str(host)
     except Exception:  # noqa: BLE001
         return "?"
 

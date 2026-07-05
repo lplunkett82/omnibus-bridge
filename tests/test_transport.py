@@ -195,7 +195,10 @@ async def test_server_sends_inner_frame_to_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_server_rejects_second_concurrent_client() -> None:
+async def test_new_connection_evicts_stale_client() -> None:
+    """After a silent drop the Translator redials from a new port while the
+    old socket still looks alive. The newest connection must win: the stale
+    client is aborted and the new one can handshake normally."""
     handler = CollectingHandler()
     server = await _start_server(handler)
     try:
@@ -204,16 +207,72 @@ async def test_server_rejects_second_concurrent_client() -> None:
         trans1 = ScriptedTranslator(r1, w1)
         await trans1.full_handshake()
         await asyncio.sleep(0.05)
+        first = server.current_client
+        assert first is not None
+
+        # Second client connects — evicts the first and handshakes fine.
+        r2, w2 = await asyncio.open_connection("127.0.0.1", server.port)
+        trans2 = ScriptedTranslator(r2, w2)
+        await trans2.full_handshake()
+        await asyncio.sleep(0.05)
+        assert server.current_client is not None
+        assert server.current_client is not first
+        assert server.current_client.session.session_id == trans2.session_id
+
+        # First client's socket is dead (RST or EOF).
+        try:
+            data = await asyncio.wait_for(r1.read(10), timeout=1.0)
+            assert data == b""
+        except ConnectionError:
+            pass
+        w1.close()
+        trans2.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_connection_from_unlisted_peer_is_rejected() -> None:
+    handler = CollectingHandler()
+    server = OmniLinkServer(
+        PRIVATE_KEY, handler, host="127.0.0.1", port=0,
+        allowed_peer="203.0.113.9",
+    )
+    await server.start()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        eof = await asyncio.wait_for(reader.read(10), timeout=1.0)
+        assert eof == b""
+        assert server.current_client is None
+        writer.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_handshake_timeout_aborts_idle_connection() -> None:
+    """A client that connects but never handshakes must not hold the single
+    client slot forever — the watchdog aborts it."""
+    handler = CollectingHandler()
+    server = OmniLinkServer(
+        PRIVATE_KEY, handler, host="127.0.0.1", port=0,
+        handshake_timeout=0.2,
+    )
+    await server.start()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        await asyncio.sleep(0.05)
         assert server.current_client is not None
 
-        # Second client connects — should be closed immediately by the server.
-        r2, w2 = await asyncio.open_connection("127.0.0.1", server.port)
-        # Reading should EOF (server closed us).
-        eof = await asyncio.wait_for(r2.read(10), timeout=1.0)
-        assert eof == b""
-        w2.close()
-
-        trans1.close()
+        # Send nothing. Within the timeout window the server aborts us.
+        try:
+            data = await asyncio.wait_for(reader.read(10), timeout=1.0)
+            assert data == b""
+        except ConnectionError:
+            pass
+        await asyncio.sleep(0.05)
+        assert server.current_client is None
+        writer.close()
     finally:
         await server.stop()
 

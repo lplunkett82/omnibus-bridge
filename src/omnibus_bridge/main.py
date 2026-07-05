@@ -55,6 +55,13 @@ DEFAULT_UNIT_COUNT = 36
 # anything >= 1 s is a fresh press.
 _DIM_STREAM_GAP_S = 1.0
 
+# Pushes queued while the Translator is offline are dropped if they're older
+# than this when the next session comes up. Flushing an arbitrarily old
+# command on reconnect would actuate a relay long after the user's intent
+# (and after physical wall-switch changes we never saw) — a phantom-on by
+# our own hand.
+PENDING_PUSH_TTL_S = 60.0
+
 
 @dataclass
 class _ButtonDimState:
@@ -93,6 +100,7 @@ class Bridge:
         devices: list[Device] | None = None,
         mqtt: MqttClient | None = None,
         state_file: Path | None = None,
+        allowed_peer: str | None = None,
     ) -> None:
         self.state = UnitStateTable(unit_count)
         self._state_file = state_file
@@ -105,7 +113,8 @@ class Bridge:
             # lights OFF from our fresh table on session startup).
             self.state.on_change(self._on_state_persist)
         self.server = OmniLinkServer(
-            private_key, self._on_event, host=host, port=port
+            private_key, self._on_event, host=host, port=port,
+            allowed_peer=allowed_peer,
         )
         self._mqtt = mqtt
         self._devices_by_unit: dict[int, Device] = {
@@ -116,8 +125,10 @@ class Bridge:
         )
         # Pushes that couldn't be sent because the Translator was offline mid-
         # reconnect. Keyed by unit — last-write-wins, which is what we want
-        # (no point sending stale intermediate states).
-        self._pending_pushes: dict[int, int] = {}
+        # (no point sending stale intermediate states). Values are
+        # (status, queued_at_monotonic); entries older than PENDING_PUSH_TTL_S
+        # are discarded at flush time instead of actuating stale intent.
+        self._pending_pushes: dict[int, tuple[int, float]] = {}
         # Per-wall-button direction-alternation state for the level sensor.
         self._button_dim: dict[int, _ButtonDimState] = {}
         if mqtt is not None:
@@ -348,7 +359,7 @@ class Bridge:
     async def _push_unit(self, unit: int, status: int) -> None:
         client = self.server.current_client
         if client is None:
-            self._pending_pushes[unit] = status
+            self._pending_pushes[unit] = (status, time.monotonic())
             log.info("queued push unit=%d status=%d (Translator offline)", unit, status)
             return
         await self._send_push(client, unit, status)
@@ -361,23 +372,39 @@ class Bridge:
                 use_seq_zero=True,
             )
             log.info("pushed unit=%d status=%d to Translator", unit, status)
-        except RuntimeError as e:
-            # Session transitioned between check and send (reconnect race).
-            # Re-queue and let the next HandshakeComplete flush it.
-            self._pending_pushes[unit] = status
-            log.info("push raced reconnect; requeued unit=%d status=%d (%s)",
-                     unit, status, e)
+        except (RuntimeError, OSError) as e:
+            # RuntimeError: session transitioned between check and send
+            # (reconnect race). OSError/ConnectionError: socket died mid-
+            # write. Either way, re-queue and let the next HandshakeComplete
+            # flush it (subject to the TTL).
+            self._pending_pushes[unit] = (status, time.monotonic())
+            log.info("push failed; requeued unit=%d status=%d (%s)", unit, status, e)
         except Exception:  # noqa: BLE001
             log.exception("failed to push unit %d status=%d", unit, status)
 
     async def _flush_pending_pushes(self, client: ConnectedClient) -> None:
-        """Send any pushes that were queued while the Translator was offline."""
+        """Send pushes queued while the Translator was offline; drop stale ones.
+
+        A push older than PENDING_PUSH_TTL_S no longer reflects anyone's
+        current intent — actuating it after a long outage is a phantom
+        activation, so it's discarded loudly instead.
+        """
         if not self._pending_pushes:
             return
         pending = dict(self._pending_pushes)
         self._pending_pushes.clear()
-        log.info("flushing %d queued push(es) after handshake", len(pending))
-        for unit, status in pending.items():
+        now = time.monotonic()
+        fresh = {u: s for u, (s, t) in pending.items() if now - t <= PENDING_PUSH_TTL_S}
+        stale = {u: s for u, (s, t) in pending.items() if u not in fresh}
+        if stale:
+            log.warning(
+                "discarding %d stale queued push(es) older than %.0f s: %s",
+                len(stale), PENDING_PUSH_TTL_S,
+                ", ".join(f"unit={u} status={s}" for u, s in stale.items()),
+            )
+        if fresh:
+            log.info("flushing %d queued push(es) after handshake", len(fresh))
+        for unit, status in fresh.items():
             await self._send_push(client, unit, status)
 
     # ---- MQTT glue --------------------------------------------------------
@@ -608,9 +635,8 @@ def _parse_lock_command(payload: str) -> int | None:
 def _load_devices_yaml(path: Path) -> list[Device]:
     """Load a device list from the YAML file tools/scan.py writes.
 
-    Intentionally minimal YAML parsing — we only need flat scalars under a
-    `translator:` block and a `devices:` list of dicts. Using yaml.safe_load
-    adds a dep we don't otherwise need.
+    We only need flat scalars under a `translator:` block and a `devices:`
+    list of dicts; yaml.safe_load handles both.
     """
     import yaml  # deferred import; pyyaml is already in the deps
     data = yaml.safe_load(path.read_text()) or {}
@@ -679,6 +705,7 @@ async def _run(args: argparse.Namespace) -> int:
         devices=devices,
         mqtt=mqtt_client,
         state_file=Path(args.state_file) if args.state_file else None,
+        allowed_peer=args.allow_peer,
     )
     if mqtt_client is not None:
         _pending.append(bridge)  # type: ignore[has-type]
@@ -715,6 +742,9 @@ def main() -> int:
     parser.add_argument("--env", default=".env", help="path to .env with OMNILINK_KEY1/2")
     parser.add_argument("--host", default="0.0.0.0", help="bind host (default 0.0.0.0)")
     parser.add_argument("--port", type=int, default=4369, help="bind port (default 4369)")
+    parser.add_argument("--allow-peer", default=None,
+                        help="Only accept Omni-Link connections from this IP "
+                             "(the Translator). Default: accept any peer.")
     parser.add_argument("--units", type=int, default=DEFAULT_UNIT_COUNT,
                         help=f"number of Units to expose (default {DEFAULT_UNIT_COUNT})")
     parser.add_argument("--log-level", default="INFO",

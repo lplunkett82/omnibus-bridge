@@ -120,14 +120,24 @@ class UnitStateTable:
         except (OSError, json.JSONDecodeError) as e:
             log.warning("state load from %s failed: %s — starting fresh", path, e)
             return 0
+        units = data.get("units") if isinstance(data, dict) else None
+        if not isinstance(units, dict):
+            log.warning("state file %s has no usable 'units' mapping — starting fresh", path)
+            return 0
         loaded = 0
-        for k, v in (data.get("units") or {}).items():
+        for k, v in units.items():
+            # A corrupt entry (non-dict value, non-numeric status, out-of-
+            # range unit) is skipped rather than crashing startup — losing
+            # one unit's persisted state beats losing all of them.
             try:
                 unit = int(k)
-            except (TypeError, ValueError):
+                status = int(v.get("status", 0))
+                time_remaining = int(v.get("time_remaining", 0))
+            except (TypeError, ValueError, AttributeError):
+                log.warning("state file %s: skipping malformed entry %r=%r", path, k, v)
                 continue
-            if 1 <= unit <= self._count:
-                self._status[unit] = int(v.get("status", 0))
-                self._time[unit] = int(v.get("time_remaining", 0))
+            if 1 <= unit <= self._count and 0 <= status <= 0xFF:
+                self._status[unit] = status
+                self._time[unit] = max(0, time_remaining)
                 loaded += 1
         return loaded

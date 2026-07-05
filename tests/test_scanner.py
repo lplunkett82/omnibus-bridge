@@ -206,6 +206,11 @@ def test_parses_full_device_inventory_from_live_listdevices_capture():
     import os
     src_ip = os.environ.get("SCANNER_SRC_IP", "192.0.2.10")
     stream = _pcap_tcp_stream_from_ip(CAPTURE, src_ip)
+    if not stream:
+        pytest.skip(
+            f"no TCP payload from {src_ip} in {CAPTURE.name}; set SCANNER_SRC_IP "
+            "to the capture's Translator IP (live captures use 192.168.1.30)"
+        )
     frames = split_frames(stream)
     devices: list[Device] = []
     for f in frames:
